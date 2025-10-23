@@ -1,0 +1,93 @@
+name: Deploy Fixed Order Laravel Application to Production Server
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v3
+
+    - name: Set up PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: 8.2
+    
+    - name: Install Dependencies
+      run: composer install --no-dev --optimize-autoloader --no-progress --no-interaction --prefer-dist
+
+    - name: Install Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '22'
+
+    - name: Install Node.js Dependencies
+      run: |
+        rm -rf node_modules
+        rm -f package-lock.json
+        npm install --legacy-peer-deps
+    
+    - name: Build Assets
+      run: npm run build
+
+    - name: Set up SSH key
+      uses: webfactory/ssh-agent@v0.5.3
+      with:
+        ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+    - name: Add Remote Host to Known Hosts
+      run: |
+        mkdir -p ~/.ssh
+        ssh-keyscan -H ${{ secrets.REMOTE_HOST }} >> ~/.ssh/known_hosts
+    
+    - name: Sync Files to Production Server
+      uses: easingthemes/ssh-deploy@v2.1.5
+      env:
+        SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        SOURCE: "."
+        REMOTE_HOST: ${{ secrets.REMOTE_HOST }}
+        REMOTE_USER: ${{ secrets.REMOTE_USER }}
+        TARGET: "/var/www/fo.ardiles"
+        EXCLUDE: "/node_modules/, /.git/, /.github/, /tests/, /.env, /storage/app/, /storage/framework/cache/, /storage/framework/sessions/, /storage/framework/views/, /storage/logs/"
+    
+    - name: Deploy and Configure Application
+      uses: appleboy/ssh-action@v0.1.6
+      with:
+        host: ${{ secrets.REMOTE_HOST }}
+        username: ${{ secrets.REMOTE_USER }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        script: |
+          cd /var/www/fo.ardiles
+          
+          # Set proper permissions
+          sudo chown -R www-data:www-data /var/www/fo.ardiles/storage
+          sudo chown -R www-data:www-data /var/www/fo.ardiles/bootstrap/cache
+          sudo chmod -R 775 /var/www/fo.ardiles/storage
+          sudo chmod -R 775 /var/www/fo.ardiles/bootstrap/cache
+          
+          # Clear all caches
+          php artisan optimize:clear
+          php artisan config:clear
+          php artisan route:clear
+          php artisan view:clear
+          php artisan cache:clear
+          
+          # Run migrations
+          php artisan migrate --force
+          
+          # Create storage link if not exists
+          php artisan storage:link
+          
+          # Optimize application
+          php artisan config:cache
+          php artisan route:cache
+          php artisan view:cache
+          php artisan optimize
+          
+          # Restart web server
+          sudo systemctl restart nginx || sudo systemctl restart apache2
